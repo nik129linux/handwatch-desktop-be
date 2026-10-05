@@ -1,0 +1,7 @@
+{
+  "uuid": "retoma-focus@retoma.local",
+  "name": "Retoma Focus",
+  "description": "Exports the focused window (app id, app name, title) over D-Bus for Retoma live tracking. Never records keystrokes or screen content.",
+  "shell-version": ["48", "49", "50"],
+  "version": 1
+}

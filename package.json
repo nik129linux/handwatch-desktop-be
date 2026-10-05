@@ -1,0 +1,20 @@
+{
+  "name": "retoma",
+  "version": "1.0.0",
+  "description": "Retoma: a desktop companion that helps you pick up where you left off",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron . --no-sandbox",
+    "dist": "electron-builder --linux dir"
+  },
+  "build": {
+    "appId": "com.retoma.desktop",
+    "productName": "Retoma",
+    "files": ["index.html", "main.js", "preload.js", "ai/", "css/", "js/", "fonts/", "build/icon.svg", "build/tray-active.png", "build/tray-paused.png", "package.json"],
+    "linux": { "target": ["dir"], "icon": "build/icon.svg", "category": "Utility" }
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3"
+  }
+}

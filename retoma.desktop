@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Retoma
+Comment=Retoma — pick up where you left off
+Exec=sh -c "cd /home/nico/pf/desktop && npm start"
+Path=/home/nico/pf/desktop
+Terminal=false
+Categories=Utility;
+Icon=/home/nico/pf/desktop/build/icon.svg
+StartupWMClass=Retoma
