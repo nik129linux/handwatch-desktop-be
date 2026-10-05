@@ -21,6 +21,24 @@ function ok(cond, label, detail) {
   console.log('  ✗ ' + label + (detail ? '\n      ' + detail : ''));
   return false;
 }
+/* L3: screenshots and state checks start only once the Demo/Live crossfade
+ * has settled (dur-enter 360ms); at settle exactly one view is visible. */
+async function settleLive(w) {
+  await w.waitForTimeout(700);
+  const xor = await w.evaluate(() => {
+    const liveVis = !document.getElementById('liveView').classList.contains('is-hidden');
+    const winsVis = Array.from(document.querySelectorAll('.window')).filter(e => getComputedStyle(e).display !== 'none');
+    return { liveVis: liveVis, winsVis: winsVis.length, isLive: document.body.classList.contains('is-live') };
+  });
+  return xor;
+}
+function xorOk(xor, wantLive, label) {
+  const good = wantLive
+    ? (xor.liveVis === true && xor.winsVis === 0 && xor.isLive === true)
+    : (xor.liveVis === false && xor.winsVis === 4 && xor.isLive === false);
+  return ok(good, label, JSON.stringify(xor));
+}
+const DEMO_STRINGS = ['Quality report', 'Brightspace', '40 min'];
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
@@ -138,6 +156,7 @@ function ok(cond, label, detail) {
   await runA.window.click('.menu-bar [data-mode="live"]');
   await runA.window.waitForFunction(() => document.body.classList.contains('is-live'), { timeout: 5000 });
   ok(true, 'L2 mode switch enters live view');
+  xorOk(await settleLive(runA.window), true, 'L3 exactly the Live view is visible at settle');
   ok(await runA.window.evaluate(() => !document.getElementById('liveView').classList.contains('is-hidden')), 'L2 live view visible');
   ok(await runA.window.evaluate(() => document.getElementById('storyPlay').disabled === true), 'L2 sim buttons disabled in live');
   ok(await runA.window.evaluate(() => document.getElementById('storyPlay').title === 'Disabled in Live mode'), 'L2 sim buttons carry a tooltip');
@@ -146,8 +165,25 @@ function ok(cond, label, detail) {
   ok(((await runA.window.locator('#liveStatusText').textContent()) || '').includes('Waiting for helper'), 'L2 chip reads Waiting for helper');
   ok(await runA.window.evaluate(() => !document.getElementById('helperCard').classList.contains('is-hidden')), 'L2 setup card shows 3 steps');
   ok(await runA.window.evaluate(() => document.querySelectorAll('#helperCard .helper-card__step').length === 3), 'L2 setup card has 3 numbered steps');
+  ok(await runA.window.evaluate(() => !!document.querySelector('#helperCard ol.helper-card__steps')), 'L3 steps are a numbered list');
   ok(((await runA.window.locator('#enableCmd').textContent()) || '').trim() === 'gnome-extensions enable retoma-focus@retoma.local', 'L2 enable command text is exact');
+  ok(await runA.window.evaluate(() => !document.getElementById('enableCmd').classList.contains('is-hidden') && !document.getElementById('enableCopy').classList.contains('is-hidden')), 'L3 command visible and copyable from the start');
+  // L3 honesty: empty Live shows no demo seed anywhere visible.
+  ok(((await runA.window.locator('#liveNow').textContent()) || '').trim() === 'Now: waiting for activity', 'L3 empty Live Now waits for activity');
+  ok(((await runA.window.locator('#liveToday').textContent()) || '').trim() === 'Nothing tracked yet', 'L3 empty Live Today is an empty state');
+  ok(await runA.window.evaluate(() => document.querySelectorAll('#liveBar .live-bar__seg').length === 0), 'L3 empty Live has no timeline bar');
+  ok(await runA.window.evaluate(() => document.getElementById('proposalCard').classList.contains('is-hidden')), 'L3 empty Live has no AI proposal');
+  const visA = await runA.window.evaluate(() => document.body.innerText);
+  const leakA = DEMO_STRINGS.filter(s => visA.includes(s));
+  ok(leakA.length === 0, 'L3 no demo seed in visible Live text', leakA.join('|') || 'clean');
+  const inertA = await runA.window.evaluate(() => Array.from(document.querySelectorAll('.window')).map(w => getComputedStyle(w).display + '/' + w.hasAttribute('inert') + '/' + w.getAttribute('aria-hidden')));
+  ok(inertA.every(s => s === 'none/true/true'), 'L3 demo windows display:none + inert in Live', inertA.join(' '));
   await runA.window.screenshot({ path: path.join(SHOTS, 'live-setup.png') });
+  await runA.window.evaluate(() => window.Theme.apply('light', false));
+  await settleLive(runA.window);
+  await runA.window.screenshot({ path: path.join(SHOTS, 'live-empty-light.png') });
+  await runA.window.evaluate(() => window.Theme.apply('dark', false));
+  await settleLive(runA.window);
   await runA.window.evaluate(() => { Retoma.openPanel(); Retoma.switchTab('priv'); });
   await runA.window.waitForTimeout(300);
   await runA.window.click('#livePause');
@@ -159,8 +195,27 @@ function ok(cond, label, detail) {
   await runA.app.close();
   runA = await launchL2(PROFILE_A, { HOME: HOME_A });
   ok(await runA.window.evaluate(() => window.Live && window.Live.getMode()) === 'live', 'L2 mode persists across restart', 'got ' + await runA.window.evaluate(() => window.Live && window.Live.getMode()));
-  const keptA = await runA.window.evaluate(() => window.retoma.loadEvents());
-  ok(Array.isArray(keptA) && keptA.length >= 1, 'L2 switching never loses stored data', JSON.stringify(keptA).slice(0, 100));
+  xorOk(await settleLive(runA.window), true, 'L3 restarted Live settles on the Live view');
+  // L3: per-mode stores — the demo history survives in its own store, Live stays empty.
+  const keptDemo = await runA.window.evaluate(() => window.retoma.loadEvents('demo'));
+  ok(Array.isArray(keptDemo) && keptDemo.length >= 1, 'L3 switching never loses demo data (demo store)', JSON.stringify(keptDemo).slice(0, 100));
+  const keptLive = await runA.window.evaluate(() => window.retoma.loadEvents());
+  ok(Array.isArray(keptLive) && keptLive.length === 0, 'L3 Live starts empty with no live events', JSON.stringify(keptLive).slice(0, 100));
+  // L3: Delete everything in Live deletes only the live store (and says so).
+  await runA.window.evaluate(() => window.retoma.saveEvents([{ app: 'Terminal', duration: 5, ts: new Date().toISOString() }], 'live'));
+  await runA.window.evaluate(() => { Retoma.openPanel(); Retoma.switchTab('priv'); });
+  await runA.window.waitForTimeout(300);
+  await runA.window.click('#privacyDelete');
+  await runA.window.waitForTimeout(300);
+  ok(/Only the Live history/.test((await runA.window.locator('#confirmText').textContent()) || ''), 'L3 confirm says Live-only in Live mode');
+  await runA.window.click('#confirmNo');
+  await runA.window.waitForTimeout(300);
+  await runA.window.evaluate(() => { Retoma.closePanel(); window.retoma.deleteEvents(); });
+  await runA.window.waitForTimeout(300);
+  const afterDelLive = await runA.window.evaluate(() => window.retoma.loadEvents('live'));
+  const afterDelDemo = await runA.window.evaluate(() => window.retoma.loadEvents('demo'));
+  ok(Array.isArray(afterDelLive) && afterDelLive.length === 0, 'L3 Live delete empties the live store');
+  ok(Array.isArray(afterDelDemo) && afterDelDemo.length >= 1, 'L3 Live delete keeps the demo store', JSON.stringify(afterDelDemo).slice(0, 100));
   await runA.app.close();
 
   // B · scripted fake timeline: now line, real timeline, Got it card, titles, blocklist, installer.
@@ -189,10 +244,12 @@ function ok(cond, label, detail) {
   }), 'L2 honest Wayland line present');
   const chipsB = (await runB.window.locator('#resumeChips').textContent()) || '';
   ok(/Private app/.test(chipsB) && /Firefox/.test(chipsB), 'L2 card lists apps used before the break', chipsB.trim().slice(0, 120));
-  const bodyB = await runB.window.evaluate(() => document.body.textContent);
+  const bodyB = await runB.window.evaluate(() => document.body.innerText);
   ok(!bodyB.includes(LONG_TITLE) && !bodyB.includes('vault') && !/KeePassXC/.test(bodyB), 'L2 titles OFF: nothing leaks into the DOM');
-  const eventsRaw = fs.readFileSync(path.join(PROFILE_B, 'events.json'), 'utf8');
-  ok(!eventsRaw.includes(LONG_TITLE.slice(0, 20)) && !/KeePassXC|vault/.test(eventsRaw), 'L2 titles OFF: nothing leaks into events.json');
+  const leakB = DEMO_STRINGS.filter(s => bodyB.includes(s));
+  ok(leakB.length === 0, 'L3 live with fake events shows no demo seed', leakB.join('|') || 'clean');
+  const eventsRaw = fs.readFileSync(path.join(PROFILE_B, 'events-live.json'), 'utf8');
+  ok(!eventsRaw.includes(LONG_TITLE.slice(0, 20)) && !/KeePassXC|vault/.test(eventsRaw), 'L2 titles OFF: nothing leaks into events-live.json');
   ok(/Private app/.test(eventsRaw), 'L2 blocklisted app stored as Private app');
   ok(((await runB.window.locator('#liveStatusText').textContent()) || '').includes('Tracking this PC'), 'L2 chip reads Tracking this PC');
   await runB.window.evaluate(() => { Retoma.openPanel(); Retoma.switchTab('hoy'); });
@@ -203,18 +260,18 @@ function ok(cond, label, detail) {
   await runB.window.waitForTimeout(300);
   ok(await runB.window.evaluate(() => document.querySelectorAll('[data-away]').length === 3), 'L2 away-after 2/5/10 control present');
   ok(await runB.window.evaluate(() => document.getElementById('titlesToggle').checked === false), 'L2 titles default OFF');
-  // screenshots: resume + live view in both themes
+  // screenshots: resume + live view in both themes (only after the crossfade settles)
   await runB.window.evaluate(() => window.Theme.apply('dark', false));
   await runB.window.evaluate(() => { Retoma.openPanel(); Retoma.switchTab('ahora'); });
-  await runB.window.waitForTimeout(500);
+  await runB.window.waitForTimeout(700);
   await runB.window.screenshot({ path: path.join(SHOTS, 'live-resume-dark.png') });
   await runB.window.evaluate(() => document.getElementById('retomarBtn').click());
   await runB.window.waitForTimeout(400);
   await runB.window.evaluate(() => Retoma.closePanel());
-  await runB.window.waitForTimeout(300);
+  xorOk(await settleLive(runB.window), true, 'L3 fake-events Live settles on one view (dark)');
   await runB.window.screenshot({ path: path.join(SHOTS, 'live-dark.png') });
   await runB.window.evaluate(() => window.Theme.apply('light', false));
-  await runB.window.waitForTimeout(500);
+  xorOk(await settleLive(runB.window), true, 'L3 fake-events Live settles on one view (light)');
   await runB.window.screenshot({ path: path.join(SHOTS, 'live-light.png') });
   // titles ON via replay: truncated to 60
   await runB.window.evaluate(() => window.retoma.saveSettings({ storeTitles: true }));
@@ -225,7 +282,7 @@ function ok(cond, label, detail) {
   ok(nowOn.includes(LONG_TITLE.slice(0, 60)) && !nowOn.includes(LONG_TITLE), 'L2 titles ON: truncated to 60', nowOn.slice(0, 140));
   await runB.window.evaluate(() => window.Theme.apply('light', false));
   await runB.window.evaluate(() => { Retoma.openPanel(); Retoma.switchTab('ahora'); });
-  await runB.window.waitForTimeout(500);
+  await runB.window.waitForTimeout(700);
   await runB.window.screenshot({ path: path.join(SHOTS, 'live-resume-light.png') });
   // installer over IPC with a temp HOME
   const noConfirm = await runB.window.evaluate(() => window.retoma.helperInstall({ skipDialog: true, confirm: false }));

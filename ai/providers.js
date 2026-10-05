@@ -4,13 +4,15 @@
  * output is validated, failures fall back to rules. */
 'use strict';
 
+var habits = require('./habits');
+
 var TIMEOUT_MS = 8000;
 var FALLBACK_NOTE = 'Model unavailable, used on-device rules';
 var OLLAMA_DEFAULT_URL = 'http://127.0.0.1:11434';
 var GEMINI_LIST_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 function ollamaBaseUrl() {
-  return process.env.RETOMA_OLLAMA_URL || OLLAMA_DEFAULT_URL;
+  return process.env.OLLAMA_URL || process.env.RETOMA_OLLAMA_URL || OLLAMA_DEFAULT_URL;
 }
 
 function geminiKey() {
@@ -137,10 +139,31 @@ function previewPayload(summary, mode, modelHint) {
   return null;
 }
 
+/* Prefer a fully on-device model; cloud-tagged entries (remote_host set,
+ * e.g. gemma4:31b-cloud) are still valid Ollama models and are used when
+ * they are the only ones installed. */
+/* Models (gemma included) often wrap JSON in ```json fences even with
+ * format:json. Strip the fence, or take the outermost {...}, then parse. */
+function parseModelJson(text) {
+  var t = String(text == null ? '' : text).trim();
+  var f = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(t);
+  if (f) t = f[1].trim();
+  try { return JSON.parse(t); } catch (e) {
+    var a = t.indexOf('{'), b = t.lastIndexOf('}');
+    if (a >= 0 && b > a) return JSON.parse(t.slice(a, b + 1));
+    throw e;
+  }
+}
+
+/* Model policy: OLLAMA_MODEL env wins, otherwise a gemma model (cloud-tagged
+ * gemma4:31b-cloud is fine). Never auto-pick another local model: a big local
+ * one can freeze the PC. No gemma = null = rules. */
 function pickLocalModel(tagsJson) {
   var models = (tagsJson && tagsJson.models) || [];
+  var want = process.env.OLLAMA_MODEL;
   for (var i = 0; i < models.length; i++) {
-    if (!models[i].remote_host && models[i].name) return models[i].name;
+    var n = models[i] && models[i].name;
+    if (n && (want ? n === want : /^gemma/i.test(n))) return n;
   }
   return null;
 }
@@ -164,7 +187,7 @@ function ollamaPropose(summary, opts) {
         .then(function (res) { return res.json(); })
         .then(function (gen) {
           var parsed;
-          try { parsed = JSON.parse(gen.response); } catch (e) { throw new Error('bad json'); }
+          try { parsed = parseModelJson(gen.response); } catch (e) { throw new Error('bad json'); }
           if (!validateProposal(parsed)) throw new Error('invalid shape');
           return { start: parsed.start, minutes: parsed.minutes, reason: parsed.reason, source: 'Local model \u00b7 ' + model, fallback: false };
         });
@@ -207,7 +230,7 @@ function geminiPropose(summary, opts) {
             text = parts.map(function (p) { return p.text || ''; }).join('');
           } catch (e) { throw new Error('bad shape'); }
           var parsed;
-          try { parsed = JSON.parse(text); } catch (e) { throw new Error('bad json'); }
+          try { parsed = parseModelJson(text); } catch (e) { throw new Error('bad json'); }
           if (!validateProposal(parsed)) throw new Error('invalid shape');
           return { start: parsed.start, minutes: parsed.minutes, reason: parsed.reason, source: 'Cloud \u00b7 Gemini', fallback: false };
         });
@@ -245,6 +268,146 @@ function capabilities() {
   };
 }
 
+/* --- AI habit coach: same chain as proposals (rules -> Ollama -> rules).
+ * Model output is schema-validated AND grounded-checked against the input
+ * metrics; anything else falls back to the deterministic rules. */
+
+function habitsFallback(metrics, note) {
+  var r = habits.rulesReport(metrics);
+  if (!r) return { empty: true, source: 'rules', fallback: true, note: note || FALLBACK_NOTE };
+  return {
+    pattern: r.pattern,
+    note: r.note,
+    experiment: r.experiment,
+    source: 'rules',
+    fallback: true,
+    noteFlag: note || FALLBACK_NOTE
+  };
+}
+
+function buildHabitsBody(metrics, model) {
+  return { model: model, prompt: habits.reportPrompt(metrics), format: 'json', stream: false };
+}
+
+function buildAskBody(metrics, question, model) {
+  return { model: model, prompt: habits.askPrompt(metrics, question), format: 'json', stream: false };
+}
+
+/* Exact habit payload that would be sent (shown for consent). */
+function previewHabitsPayload(metrics, question) {
+  if (question !== undefined) {
+    return buildAskBody(metrics, question, 'first available local model');
+  }
+  return buildHabitsBody(metrics, 'first available local model');
+}
+
+function habitsReport(metrics, opts) {
+  var o = opts || {};
+  var mode = o.mode || 'off';
+  var consent = o.consent || {};
+  if (!metrics) {
+    return Promise.resolve({ empty: true, source: 'rules', fallback: false });
+  }
+  if (mode === 'off' || !consent[mode]) {
+    var r = habits.rulesReport(metrics);
+    if (!r) return Promise.resolve({ empty: true, source: 'rules', fallback: false });
+    var out = { pattern: r.pattern, note: r.note, experiment: r.experiment, source: 'rules', fallback: false };
+    if (mode !== 'off') out.noteFlag = 'Consent needed before the model is called';
+    return Promise.resolve(out);
+  }
+  if (mode !== 'local') {
+    return Promise.resolve(habitsFallback(metrics));
+  }
+  var base = o.ollamaUrl || ollamaBaseUrl();
+  var impl = o.fetchImpl;
+  var ms = o.timeoutMs === undefined ? TIMEOUT_MS : o.timeoutMs;
+  return fetchWithTimeout(base + '/api/tags', { method: 'GET' }, ms, impl)
+    .then(function (res) { return res.json(); })
+    .then(function (tags) {
+      var model = pickLocalModel(tags);
+      if (!model) throw new Error('no local model');
+      return fetchWithTimeout(base + '/api/generate',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildHabitsBody(metrics, model))
+        }, ms, impl)
+        .then(function (res) { return res.json(); })
+        .then(function (gen) {
+          var parsed;
+          try { parsed = parseModelJson(gen.response); } catch (e) { throw new Error('bad json'); }
+          if (!habits.validateReport(parsed)) throw new Error('invalid shape');
+          if (!habits.groundedReport(parsed, metrics)) throw new Error('ungrounded');
+          return {
+            pattern: parsed.pattern || habits.rulesReport(metrics).pattern,
+            note: parsed.note,
+            experiment: parsed.experiment,
+            source: 'Ollama · ' + model,
+            fallback: false
+          };
+        });
+    })
+    .catch(function () { return habitsFallback(metrics); });
+}
+
+function habitsAsk(metrics, question, opts) {
+  var o = opts || {};
+  var mode = o.mode || 'off';
+  var consent = o.consent || {};
+  var q = String(question || '').slice(0, 200);
+  if (!metrics) {
+    return Promise.resolve({ answer: habits.rulesAsk(null, q), source: 'rules', fallback: false });
+  }
+  if (mode === 'off' || !consent[mode] || mode !== 'local') {
+    return Promise.resolve({ answer: habits.rulesAsk(metrics, q), source: 'rules', fallback: false });
+  }
+  var base = o.ollamaUrl || ollamaBaseUrl();
+  var impl = o.fetchImpl;
+  var ms = o.timeoutMs === undefined ? TIMEOUT_MS : o.timeoutMs;
+  return fetchWithTimeout(base + '/api/tags', { method: 'GET' }, ms, impl)
+    .then(function (res) { return res.json(); })
+    .then(function (tags) {
+      var model = pickLocalModel(tags);
+      if (!model) throw new Error('no local model');
+      return fetchWithTimeout(base + '/api/generate',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildAskBody(metrics, q, model))
+        }, ms, impl)
+        .then(function (res) { return res.json(); })
+        .then(function (gen) {
+          var parsed;
+          try { parsed = parseModelJson(gen.response); } catch (e) { throw new Error('bad json'); }
+          var answer = typeof parsed === 'string' ? parsed : parsed.answer;
+          if (!habits.validateAnswer(answer)) throw new Error('invalid shape');
+          if (!habits.groundedAnswer(answer, metrics)) throw new Error('ungrounded');
+          return { answer: answer, source: 'Ollama · ' + model, fallback: false };
+        });
+    })
+    .catch(function () {
+      return { answer: habits.rulesAsk(metrics, q), source: 'rules', fallback: true, noteFlag: FALLBACK_NOTE };
+    });
+}
+
+/* Privacy-tab status: is Ollama reachable, and with which model? */
+function aiStatus(opts) {
+  var o = opts || {};
+  var base = o.ollamaUrl || ollamaBaseUrl();
+  var impl = o.fetchImpl;
+  var ms = o.timeoutMs === undefined ? TIMEOUT_MS : o.timeoutMs;
+  return fetchWithTimeout(base + '/api/tags', { method: 'GET' }, ms, impl)
+    .then(function (res) { return res.json(); })
+    .then(function (tags) {
+      var model = pickLocalModel(tags);
+      if (!model) return { reachable: true, model: '', url: base };
+      return { reachable: true, model: model, url: base };
+    })
+    .catch(function () {
+      return { reachable: false, model: '', url: base };
+    });
+}
+
 module.exports = {
   TIMEOUT_MS: TIMEOUT_MS,
   FALLBACK_NOTE: FALLBACK_NOTE,
@@ -255,9 +418,16 @@ module.exports = {
   buildOllamaBody: buildOllamaBody,
   promptFor: promptFor,
   pickLocalModel: pickLocalModel,
+  parseModelJson: parseModelJson,
   pickFlashModel: pickFlashModel,
   propose: propose,
   capabilities: capabilities,
+  habitsReport: habitsReport,
+  habitsAsk: habitsAsk,
+  aiStatus: aiStatus,
+  buildHabitsBody: buildHabitsBody,
+  buildAskBody: buildAskBody,
+  previewHabitsPayload: previewHabitsPayload,
   fmtClock: fmtClock,
   parseClock: parseClock
 };

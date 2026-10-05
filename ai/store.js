@@ -68,6 +68,55 @@ function deleteEventsFile(fsImpl, filePath) {
   }
 }
 
+/* Accepted habit experiments persist per mode with the same 7-day
+ * retention, delete-all and export behaviour as the events store. */
+function experimentsPathFor(userDataDir, mode) {
+  var m = mode === 'live' ? 'live' : 'demo';
+  return path.join(userDataDir, 'experiments-' + m + '.json');
+}
+
+function expTime(exp) {
+  if (!exp || typeof exp !== 'object') return NaN;
+  return Date.parse(exp.createdAt || '');
+}
+
+function pruneExperiments(exps, nowMs) {
+  var now = nowMs === undefined ? Date.now() : nowMs;
+  return (exps || []).filter(function (exp) {
+    var t = expTime(exp);
+    if (isNaN(t)) return true;
+    return now - t <= RETENTION_MS;
+  });
+}
+
+function loadExperimentsFile(fsImpl, filePath, nowMs) {
+  var raw;
+  try {
+    raw = fsImpl.readFileSync(filePath, 'utf8');
+  } catch (e) {
+    return [];
+  }
+  var data;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    return [];
+  }
+  var exps = Array.isArray(data) ? data : (data.experiments || []);
+  return pruneExperiments(exps, nowMs);
+}
+
+function saveExperimentsFile(fsImpl, filePath, exps, nowMs) {
+  var pruned = pruneExperiments(exps, nowMs);
+  var data = { version: STORE_VERSION, savedAt: new Date().toISOString(), experiments: pruned };
+  fsImpl.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+  return pruned;
+}
+
+function serializeExperiments(exps) {
+  return JSON.stringify({ version: STORE_VERSION, exportedAt: new Date().toISOString(), experiments: exps || [] }, null, 2);
+}
+
 function serialize(events) {
   return JSON.stringify({ version: STORE_VERSION, exportedAt: new Date().toISOString(), events: events || [] }, null, 2);
 }
@@ -80,5 +129,10 @@ module.exports = {
   loadEventsFile: loadEventsFile,
   saveEventsFile: saveEventsFile,
   deleteEventsFile: deleteEventsFile,
-  serialize: serialize
+  serialize: serialize,
+  experimentsPathFor: experimentsPathFor,
+  pruneExperiments: pruneExperiments,
+  loadExperimentsFile: loadExperimentsFile,
+  saveExperimentsFile: saveExperimentsFile,
+  serializeExperiments: serializeExperiments
 };

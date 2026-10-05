@@ -24,5 +24,9 @@ contextBridge.exposeInMainWorld('retoma', {
   onLiveStatus: (fn) => ipcRenderer.on('retoma:live:status', (ev, status) => fn(status)),
   helperDescribe: () => ipcRenderer.invoke('retoma:helper:describe'),
   helperCheck: () => ipcRenderer.invoke('retoma:helper:check'),
-  helperInstall: (opts) => ipcRenderer.invoke('retoma:helper:install', opts || {})
+  helperInstall: (opts) => ipcRenderer.invoke('retoma:helper:install', opts || {}),
+  habitsReport: (opts) => ipcRenderer.invoke('retoma:habits:report', opts || {}),
+  habitsAccept: (experiment, opts) => ipcRenderer.invoke('retoma:habits:accept', experiment, opts || {}),
+  habitsAsk: (question, opts) => ipcRenderer.invoke('retoma:habits:ask', question, opts || {}),
+  aiStatus: (opts) => ipcRenderer.invoke('retoma:ai:status', opts || {})
 });

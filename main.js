@@ -7,6 +7,7 @@ const fs = require('fs');
 
 const providers = require('./ai/providers');
 const store = require('./ai/store');
+const habits = require('./ai/habits');
 const native = require('./ai/native');
 const settingsStore = require('./ai/settings');
 const installer = require('./live/installer');
@@ -33,6 +34,16 @@ function eventsFileFor(mode) {
 
 function eventsFile() {
   return eventsFileFor(modeNow());
+}
+
+function experimentsFileFor(mode) {
+  return store.experimentsPathFor(app.getPath('userData'), mode);
+}
+
+function dayKeyLocal(ms) {
+  var d = new Date(ms);
+  function p2(n) { return String(n).padStart(2, '0'); }
+  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
 }
 
 function settingsFilePath() {
@@ -250,21 +261,107 @@ function setupIpc() {
     return true;
   });
   ipcMain.handle('retoma:events:delete', (ev, mode) => {
+    var m = mode === 'live' || mode === 'demo' ? mode : modeNow();
     store.deleteEventsFile(fs, fileForArg(mode));
+    store.deleteEventsFile(fs, experimentsFileFor(m));
     return true;
   });
   ipcMain.handle('retoma:events:export', async () => {
+    var m = modeNow();
     var loaded = store.loadEventsFile(fs, eventsFile());
+    var exps = store.loadExperimentsFile(fs, experimentsFileFor(m));
     var res = await dialog.showSaveDialog(win, {
       title: 'Export my data',
       defaultPath: 'retoma-data.json',
       filters: [{ name: 'JSON', extensions: ['json'] }]
     });
     if (res.canceled || !res.filePath) return false;
-    fs.writeFileSync(res.filePath, store.serialize(loaded.events), 'utf8');
+    var base = JSON.parse(store.serialize(loaded.events));
+    base.experiments = exps;
+    fs.writeFileSync(res.filePath, JSON.stringify(base, null, 2), 'utf8');
     return true;
   });
   ipcMain.on('retoma:notify-return', (ev, info) => showReturnNotification(info));
+  /* AI habit coach: aggregates only, gated by the existing consent. */
+  ipcMain.handle('retoma:habits:report', async (ev, opts) => {
+    var o = opts || {};
+    var m = o.mode === 'live' || o.mode === 'demo' ? o.mode : modeNow();
+    var loaded = store.loadEventsFile(fs, eventsFileFor(m));
+    var metrics = habits.computeMetrics(loaded.events || []);
+    var expFile = experimentsFileFor(m);
+    var exps = store.loadExperimentsFile(fs, expFile);
+    var evaluation = null;
+    var today = dayKeyLocal(Date.now());
+    var activeIx = -1;
+    for (var i = exps.length - 1; i >= 0; i--) {
+      if (exps[i] && exps[i].status === 'active') { activeIx = i; break; }
+    }
+    if (activeIx !== -1 && metrics) {
+      var prev = exps[activeIx];
+      var createdDay = prev.createdAt ? dayKeyLocal(Date.parse(prev.createdAt)) : '';
+      if (createdDay && createdDay !== today) {
+        evaluation = habits.evaluateExperiment(prev, metrics);
+        prev.status = 'done';
+        prev.result = evaluation ? evaluation.status : 'unknown';
+        store.saveExperimentsFile(fs, expFile, exps);
+      }
+    }
+    var report = await providers.habitsReport(metrics, {
+      mode: o.aiMode || 'off',
+      consent: o.consent || {},
+      ollamaUrl: process.env.OLLAMA_URL || process.env.RETOMA_OLLAMA_URL
+    });
+    return { metrics: metrics, report: report, evaluation: evaluation };
+  });
+  ipcMain.handle('retoma:habits:accept', (ev, experiment, opts) => {
+    var o = opts || {};
+    var m = o.mode === 'live' || o.mode === 'demo' ? o.mode : modeNow();
+    if (!experiment || typeof experiment.text !== 'string' || !experiment.text ||
+        typeof experiment.trigger !== 'string' || typeof experiment.action !== 'string' ||
+        !Number.isInteger(experiment.minutes)) {
+      return false;
+    }
+    var expFile = experimentsFileFor(m);
+    var exps = store.loadExperimentsFile(fs, expFile);
+    exps.forEach(function (e) { if (e && e.status === 'active') e.status = 'done'; });
+    exps.push({
+      id: 'exp-' + Date.now(),
+      createdAt: new Date().toISOString(),
+      pattern: experiment.pattern || '',
+      metric: experiment.metric || 'longest',
+      target: experiment.target,
+      direction: experiment.direction === 'atMost' ? 'atMost' : 'atLeast',
+      trigger: experiment.trigger,
+      action: experiment.action,
+      minutes: experiment.minutes,
+      text: experiment.text,
+      status: 'active'
+    });
+    store.saveExperimentsFile(fs, expFile, exps);
+    return true;
+  });
+  ipcMain.handle('retoma:habits:ask', async (ev, question, opts) => {
+    var o = opts || {};
+    var m = o.mode === 'live' || o.mode === 'demo' ? o.mode : modeNow();
+    var loaded = store.loadEventsFile(fs, eventsFileFor(m));
+    var metrics = habits.computeMetrics(loaded.events || []);
+    return providers.habitsAsk(metrics, question, {
+      mode: o.aiMode || 'off',
+      consent: o.consent || {},
+      ollamaUrl: process.env.OLLAMA_URL || process.env.RETOMA_OLLAMA_URL
+    });
+  });
+  ipcMain.handle('retoma:ai:status', async (ev, opts) => {
+    var o = opts || {};
+    var consent = o.consent || {};
+    var base = process.env.OLLAMA_URL || process.env.RETOMA_OLLAMA_URL;
+    if (!consent.local) {
+      return { gated: true, reachable: false, model: '', url: providers.capabilities().ollamaUrl };
+    }
+    var st = await providers.aiStatus({ ollamaUrl: base });
+    st.gated = false;
+    return st;
+  });
   ipcMain.on('retoma:paused', (ev, isPaused) => {
     paused = !!isPaused;
     try {
@@ -327,6 +424,9 @@ function enforceRetention() {
       var f = eventsFileFor(m);
       var loaded = store.loadEventsFile(fs, f);
       store.saveEventsFile(fs, f, loaded.events);
+      var xf = experimentsFileFor(m);
+      var exps = store.loadExperimentsFile(fs, xf);
+      store.saveExperimentsFile(fs, xf, exps);
     });
   } catch (e) { /* first run: nothing stored yet */ }
 }
