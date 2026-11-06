@@ -5,16 +5,52 @@
   "main": "main.js",
   "scripts": {
     "start": "electron . --no-sandbox",
-    "dist": "electron-builder --linux dir"
+    "dist": "electron-builder --linux dir",
+    "dist:win": "electron-builder --win nsis --x64"
   },
   "build": {
     "appId": "com.retoma.desktop",
     "productName": "Retoma",
-    "files": ["index.html", "main.js", "preload.js", "ai/", "css/", "js/", "fonts/", "build/icon.svg", "build/tray-active.png", "build/tray-paused.png", "package.json"],
-    "linux": { "target": ["dir"], "icon": "build/icon.svg", "category": "Utility" }
+    "files": [
+      "index.html",
+      "main.js",
+      "preload.js",
+      "ai/",
+      "css/",
+      "js/",
+      "fonts/",
+      "live/",
+      "build/icon.svg",
+      "build/tray-active.png",
+      "build/tray-paused.png",
+      "package.json"
+    ],
+    "linux": {
+      "target": [
+        "dir"
+      ],
+      "icon": "build/icon.svg",
+      "category": "Utility"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   },
   "devDependencies": {
     "electron": "^44.5.1",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "playwright": "1.64.1"
   }
 }

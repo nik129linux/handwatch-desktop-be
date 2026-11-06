@@ -5,6 +5,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('retoma', {
   platform: 'electron',
   propose: (summary, opts) => ipcRenderer.invoke('retoma:propose', summary, opts),
+  resumeLine: (ctx, opts) => ipcRenderer.invoke('retoma:resume-line', ctx, opts),
   previewPayload: (summary, mode) => ipcRenderer.invoke('retoma:preview', summary, mode),
   capabilities: () => ipcRenderer.invoke('retoma:capabilities'),
   loadEvents: (mode) => ipcRenderer.invoke('retoma:events:load', mode),
@@ -14,6 +15,7 @@ contextBridge.exposeInMainWorld('retoma', {
   notifyReturn: (info) => ipcRenderer.send('retoma:notify-return', info),
   setPaused: (paused) => ipcRenderer.send('retoma:paused', paused),
   onFocusResume: (fn) => ipcRenderer.on('retoma:focus-resume', () => fn()),
+  onNoteFocus: (fn) => ipcRenderer.on('retoma:note:focus', () => fn()),
   loadSettings: () => ipcRenderer.invoke('retoma:settings:load'),
   saveSettings: (patch) => ipcRenderer.invoke('retoma:settings:save', patch),
   onSettings: (fn) => ipcRenderer.on('retoma:settings', (ev, data) => fn(data)),
@@ -28,5 +30,7 @@ contextBridge.exposeInMainWorld('retoma', {
   habitsReport: (opts) => ipcRenderer.invoke('retoma:habits:report', opts || {}),
   habitsAccept: (experiment, opts) => ipcRenderer.invoke('retoma:habits:accept', experiment, opts || {}),
   habitsAsk: (question, opts) => ipcRenderer.invoke('retoma:habits:ask', question, opts || {}),
-  aiStatus: (opts) => ipcRenderer.invoke('retoma:ai:status', opts || {})
+  aiStatus: (opts) => ipcRenderer.invoke('retoma:ai:status', opts || {}),
+  serverStatus: () => ipcRenderer.invoke('retoma:server:status'),
+  setLang: (lang) => ipcRenderer.send('retoma:lang', lang)
 });

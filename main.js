@@ -14,10 +14,13 @@ const installer = require('./live/installer');
 const liveManager = require('./live/live-manager');
 const focusSourceMod = require('./live/focus-source');
 const idleSourceMod = require('./live/idle-source');
+const winSourceMod = require('./live/win-source');
+const hyprSourceMod = require('./live/hypr-source');
 
 let win = null;
 let tray = null;
 let paused = false;
+let appLang = 'en';
 let settingsFile = null;
 let liveMgr = null;
 let liveClock = null;
@@ -35,6 +38,7 @@ function eventsFileFor(mode) {
 function eventsFile() {
   return eventsFileFor(modeNow());
 }
+
 
 function experimentsFileFor(mode) {
   return store.experimentsPathFor(app.getPath('userData'), mode);
@@ -84,8 +88,18 @@ function setupLive() {
   var focusSrc = null;
   var idleSrc = null;
   if (!fakeSamples) {
-    focusSrc = focusSourceMod.createFocusSource({});
-    idleSrc = idleSourceMod.createIdleSource({});
+    if (process.platform === 'win32') {
+      var winSources = winSourceMod.createWinSources({});
+      focusSrc = winSources.focus;
+      idleSrc = winSources.idle;
+    } else if (hyprSourceMod.isHyprland(process.env)) {
+      var hyprSources = hyprSourceMod.createHyprSources({});
+      focusSrc = hyprSources.focus;
+      idleSrc = hyprSources.idle;
+    } else {
+      focusSrc = focusSourceMod.createFocusSource({});
+      idleSrc = idleSourceMod.createIdleSource({});
+    }
   }
   liveMgr = liveManager.createLiveManager({
     focusSource: focusSrc,
@@ -185,8 +199,25 @@ function refreshTray() {
   if (!tray) return;
   try {
     tray.setImage(nativeImage.createFromPath(trayIconPath(paused)));
-    tray.setContextMenu(Menu.buildFromTemplate([
+    tray.setContextMenu(Menu.buildFromTemplate(appLang === 'es' ? [
+      { label: 'Abrir Retoma', click: () => { if (win) { win.show(); win.focus(); } } },
+      { label: 'Dejar una nota…', click: () => { if (win) { if (!win.isVisible()) win.show(); win.focus(); if (!win.isDestroyed()) win.webContents.send('retoma:note:focus'); } } },
+      {
+        label: paused ? 'Reanudar seguimiento' : 'Pausar seguimiento',
+        click: () => {
+          paused = !paused;
+          if (win && !win.isDestroyed()) {
+            win.webContents.executeJavaScript(
+              'window.Retoma && window.Retoma.isPaused && window.Retoma.isPaused() !== ' + (paused ? 'true' : 'false') + ' ? window.Retoma.togglePause() : null'
+            );
+          }
+          refreshTray();
+        }
+      },
+      { label: appLang === 'es' ? 'Salir' : 'Quit', click: () => app.quit() }
+    ] : [
       { label: 'Open Retoma', click: () => { if (win) { win.show(); win.focus(); } } },
+      { label: 'Leave a note…', click: () => { if (win) { if (!win.isVisible()) win.show(); win.focus(); if (!win.isDestroyed()) win.webContents.send('retoma:note:focus'); } } },
       {
         label: paused ? 'Resume tracking' : 'Pause tracking',
         click: () => {
@@ -201,7 +232,7 @@ function refreshTray() {
       },
       { label: 'Quit', click: () => app.quit() }
     ]));
-    tray.setToolTip(paused ? 'Retoma (paused)' : 'Retoma');
+    tray.setToolTip(paused ? (appLang === 'es' ? 'Retoma (en pausa)' : 'Retoma (paused)') : 'Retoma');
   } catch (e) { /* headless: tray handlers are unit-tested instead */ }
 }
 
@@ -223,6 +254,14 @@ function setupShortcut() {
       if (win.isVisible()) win.hide(); else { win.show(); win.focus(); }
     });
   } catch (e) { /* headless */ }
+  try {
+    globalShortcut.register('Ctrl+Alt+N', () => {
+      if (!win) return;
+      if (!win.isVisible()) win.show();
+      win.focus();
+      if (win && !win.isDestroyed()) win.webContents.send('retoma:note:focus');
+    });
+  } catch (e) { /* headless */ }
 }
 
 function showReturnNotification(info) {
@@ -230,7 +269,9 @@ function showReturnNotification(info) {
   var appName = (info && info.app) || 'Document';
   if (!native.shouldNotify(awayMinutes)) return false;
   try {
-    var note = new Notification(native.resumeNotification(appName));
+    var note = appLang === 'es'
+      ? new Notification({ title: 'Retoma', body: 'Sigue donde quedaste: ' + appName })
+      : new Notification(native.resumeNotification(appName));
     note.on('click', () => {
       if (win) {
         if (!win.isVisible()) win.show();
@@ -244,7 +285,9 @@ function showReturnNotification(info) {
 }
 
 function setupIpc() {
-  ipcMain.handle('retoma:propose', (ev, summary, opts) => providers.propose(summary, opts));
+  ipcMain.handle('retoma:propose', (ev, summary, opts) => providers.propose(summary, Object.assign({ apiBase: process.env.RETOMA_API_BASE }, opts)));
+  ipcMain.handle('retoma:resume-line', (ev, ctx, opts) => (providers.resumeLine ? providers.resumeLine(ctx, Object.assign({ apiBase: process.env.RETOMA_API_BASE }, opts)) : null));
+  ipcMain.handle('retoma:server:status', () => providers.serverStatus({ apiBase: process.env.RETOMA_API_BASE }));
   ipcMain.handle('retoma:preview', (ev, summary, mode) => providers.previewPayload(summary, mode));
   ipcMain.handle('retoma:capabilities', () => providers.capabilities());
   function fileForArg(arg) {
@@ -362,8 +405,8 @@ function setupIpc() {
     st.gated = false;
     return st;
   });
-  ipcMain.on('retoma:paused', (ev, isPaused) => {
-    paused = !!isPaused;
+  ipcMain.on('retoma:lang', (ev, l) => { appLang = l === 'es' ? 'es' : 'en'; refreshTray(); });
+  ipcMain.on('retoma:paused', (ev, isPaused) => {    paused = !!isPaused;
     try {
       var next = persistSettings({ paused: paused });
       if (liveMgr) liveMgr.setPaused(paused);
@@ -386,13 +429,17 @@ function setupIpc() {
   ipcMain.handle('retoma:live:replay', () => (liveMgr ? liveMgr.replay() : false));
   ipcMain.handle('retoma:live:ready', () => (liveMgr ? liveMgr.ready() : false));
   ipcMain.handle('retoma:helper:describe', () => installer.describeInstall());
-  ipcMain.handle('retoma:helper:check', () => ({
-    status: liveMgr ? liveMgr.status() : 'error',
-    installed: installer.isInstalled(fs),
-    installedFiles: installer.installedFiles(fs),
-    enableCommand: installer.ENABLE_COMMAND,
-    dest: installer.destDir()
-  }));
+  ipcMain.handle('retoma:helper:check', () => {
+    var needed = installer.needsHelper(process.platform, process.env);
+    return {
+      status: liveMgr ? liveMgr.status() : 'error',
+      installed: installer.isInstalled(fs),
+      installedFiles: installer.installedFiles(fs),
+      enableCommand: installer.ENABLE_COMMAND,
+      dest: installer.destDir(),
+      needsHelper: needed
+    };
+  });
   ipcMain.handle('retoma:helper:install', async (ev, opts) => {
     var meta = installer.describeInstall();
     var confirmed;
@@ -454,6 +501,10 @@ if (!gotLock) {
 }
 app.on('window-all-closed', () => app.quit());
 app.on('activate', () => { if (!win || win.isDestroyed()) createWindow(); });
-app.on('will-quit', () => { try { globalShortcut.unregisterAll(); } catch (e) { /* noop */ } });
+app.on('will-quit', () => {
+  try { globalShortcut.unregisterAll(); } catch (e) { /* noop */ }
+  // Windows does not kill child processes with the parent: stop the probe.
+  try { if (liveMgr) liveMgr.stop(); } catch (e) { /* noop */ }
+});
 
 module.exports = { showReturnNotification: showReturnNotification, trayIconPath: trayIconPath };

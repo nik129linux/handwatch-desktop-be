@@ -3,7 +3,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { _electron } = require('/home/nico/.nvm/versions/node/v22.23.2/lib/node_modules/playwright');
+const { _electron } = require('playwright');
 
 const ROOT = path.resolve(__dirname, '..');
 const SHOTS = path.join(ROOT, 'shots');
@@ -43,7 +43,9 @@ const DEMO_STRINGS = ['Quality report', 'Brightspace', '40 min'];
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
   const electronPath = require('electron');
-  const app = await _electron.launch({ executablePath: electronPath, args: ['.', '--no-sandbox', '--user-data-dir=' + PROFILE], cwd: ROOT });
+  // These runs cover the GNOME helper path: never inherit the host compositor (Hyprland) from the dev box.
+  const GNOME_ENV = Object.assign({}, process.env, { HYPRLAND_INSTANCE_SIGNATURE: '' });
+  const app = await _electron.launch({ executablePath: electronPath, args: ['.', '--no-sandbox', '--user-data-dir=' + PROFILE], cwd: ROOT, env: GNOME_ENV });
   const window = await app.firstWindow();
   await window.waitForSelector('#deskClock', { timeout: 15000 });
   // screenshots and state checks start only once the entrance choreography is done
@@ -127,7 +129,7 @@ const DEMO_STRINGS = ['Quality report', 'Brightspace', '40 min'];
       executablePath: electronPath,
       args: ['.', '--no-sandbox', '--user-data-dir=' + profile],
       cwd: ROOT,
-      env: Object.assign({}, process.env, extraEnv || {})
+      env: Object.assign({}, process.env, { HYPRLAND_INSTANCE_SIGNATURE: '' }, extraEnv || {})
     });
     const w = await a.firstWindow();
     watchL2(w);

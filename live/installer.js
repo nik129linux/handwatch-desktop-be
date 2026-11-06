@@ -64,6 +64,13 @@ function installHelper(opts) {
   return { copied: true, dest: to, files: FILES.slice() };
 }
 
+function needsHelper(platform, env) {
+  env = env || {};
+  if (platform === 'win32') return false;
+  if (env && typeof env.HYPRLAND_INSTANCE_SIGNATURE === 'string' && env.HYPRLAND_INSTANCE_SIGNATURE.length > 0) return false;
+  return true;
+}
+
 module.exports = {
   UUID: UUID,
   FILES: FILES.slice(),
@@ -74,5 +81,6 @@ module.exports = {
   describeInstall: describeInstall,
   installedFiles: installedFiles,
   isInstalled: isInstalled,
-  installHelper: installHelper
+  installHelper: installHelper,
+  needsHelper: needsHelper
 };
